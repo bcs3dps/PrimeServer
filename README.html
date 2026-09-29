@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PrimeServe - headless RFB (VNC) server over a synthetic framebuffer</title>
+<style>
+
+body { font-family: Arial, sans-serif; font-size: 11pt; margin: 1in;
+       line-height: 1.4; max-width: 7.5in; color: #1a1a1a; }
+h1 { font-size: 18pt; color: #1a1a1a; border-bottom: 2px solid #333;
+     padding-bottom: 4pt; margin-top: 24pt; }
+h1:first-child { margin-top: 0; }
+h2 { font-size: 14pt; color: #1a1a1a; margin-top: 22pt;
+     border-bottom: 1px solid #999; padding-bottom: 2pt; }
+h3 { font-size: 12pt; color: #333; margin-top: 16pt; }
+h4 { font-size: 11pt; color: #333; margin-top: 12pt; margin-bottom: 4pt; }
+p  { margin: 6pt 0; }
+pre { background-color: #f0f0f0; border: 1px solid #ccc; padding: 8pt;
+      font-family: Consolas, monospace; font-size: 9.5pt; white-space: pre;
+      overflow-x: auto; line-height: 1.25; }
+code { font-family: Consolas, monospace; font-size: 10pt;
+       background-color: #f0f0f0; padding: 1pt 3pt; border-radius: 2px; }
+pre code { background-color: transparent; padding: 0; font-size: 9.5pt; }
+p.note, div.note { background-color: #fff3cd; border-left: 4px solid #ffc107;
+                   padding: 6pt 10pt; margin: 8pt 0; }
+p.important, div.important { background-color: #f8d7da;
+                             border-left: 4px solid #dc3545;
+                             padding: 6pt 10pt; margin: 8pt 0; }
+p.summary, div.summary { background-color: #d1ecf1;
+                         border-left: 4px solid #0c5460;
+                         padding: 6pt 10pt; margin: 8pt 0; }
+ul, ol { margin-top: 4pt; margin-bottom: 8pt; }
+li { margin-bottom: 4pt; }
+li > ul, li > ol { margin-top: 4pt; margin-bottom: 4pt; }
+/* Indented outline body. Use in markdown as:
+   <div class="indent" markdown="1"> ...markdown incl. code fences... </div>
+   (the md_in_html extension processes markdown inside the div). */
+div.indent { margin: 4pt 0 8pt 2em; }
+div.indent > :first-child { margin-top: 0; }
+div.indent > :last-child  { margin-bottom: 0; }
+table { border-collapse: collapse; margin: 10pt 0; width: 100%; }
+td, th { border: 1px solid #999; padding: 4pt 8pt; font-size: 10pt;
+         vertical-align: top; }
+th { background-color: #e0e0e0; text-align: left; }
+tr:nth-child(even) td { background-color: #f7f7f7; }
+a  { color: #1e3a8a; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #999; margin: 16pt 0; }
+strong { color: #1a1a1a; }
+img { max-width: 100%; height: auto; }
+
+.doc-meta { color: #555; font-size: 10pt; margin-top: -6pt;
+            margin-bottom: 12pt; }
+.toc { background-color: #f7f7f7; border: 1px solid #ccc;
+       padding: 10pt 14pt; margin: 16pt 0 24pt; font-size: 10.5pt; }
+.toc h2 { font-size: 12pt; margin-top: 0; margin-bottom: 6pt; border: none;
+          color: #333; }
+.toc ul { margin: 0; padding-left: 20pt; }
+.toc li { margin-bottom: 2pt; }
+.toc a { color: #1e3a8a; }
+
+@media print {
+  body { margin: 0.75in; }
+  pre, table, div.note, div.important { page-break-inside: avoid; }
+  h1, h2, h3 { page-break-after: avoid; }
+}
+
+</style>
+</head>
+<body>
+<h1>PrimeServe - headless RFB (VNC) server over a synthetic framebuffer</h1>
+<div class="toc">
+<h2>Contents</h2>
+<ul>
+  <li><a href="#test-screens">Test screens</a></li>
+  <li><a href="#status">Status</a></li>
+  <li><a href="#layout">Layout</a></li>
+  <li><a href="#the-reusable-library-and-the-harness">The reusable library, and the harness</a></li>
+  <li><a href="#build-and-run">Build and run</a></li>
+</ul>
+</div>
+<p>PrimeServe is a small, dependency-free <strong>C# RFB (VNC) server</strong> that serves an
+in-memory synthetic framebuffer over the VNC wire protocol, with no X11 and no
+real display. It exists to exercise a VNC client end to end: version and security
+handshake, VNC-Authentication (challenge/response verified with an in-house DES),
+ServerInit, RAW framebuffer updates in the client&rsquo;s negotiated pixel format, and
+PointerEvent handling (a touch is reflected into the framebuffer as a marker, so
+the touch-out direction is observable).</p>
+<p>It is also structured as a <strong>reusable server library plus a separate test
+harness</strong> (see &ldquo;The reusable library, and the harness&rdquo; below), so the server core
+can be merged into another program that needs to serve its own content over VNC.</p>
+<h2 id="test-screens">Test screens</h2>
+<p>The harness has four test screens, each answering a different question about the
+client&rsquo;s display path, chosen with <code>--screen</code>:</p>
+<ul>
+<li><strong><code>pattern</code></strong> (default): <code>R = x &amp; 0xFF</code>, <code>G = y &amp; 0xFF</code>, <code>B = 0x40</code>. Every
+  pixel is a known function of its position, so a decoded frame can be checked
+  pixel by pixel.</li>
+<li><strong><code>gradient</code></strong> (animated; <code>--animate MS</code> sets the step, default 100 ms): a
+  gradient that shifts one pixel per step - red slides along x, green along y at
+  twice the rate, blue along the diagonal the other way - so every pixel changes
+  on every step and the client&rsquo;s page flipping, buffering and any per-pixel
+  processing are exercised continuously; a stuck or torn frame is obvious at a
+  glance. <code>--animate MS</code> on its own selects this screen.</li>
+<li><strong><code>bars</code></strong>: three full-height vertical bars, pure red, pure green and pure
+  blue, in that order from the left. The display must read R, G, B; any other
+  order means the channel layout or the pixel-format negotiation is wrong.</li>
+<li><strong><code>geometry</code></strong>: a one-pixel white border on all four edges (a missing or
+  shifted side is a stride or offset error), a grey crosshair through the centre,
+  white ticks at the quarter points of every edge, a green square centred on the
+  crosshair whose side is the shorter display dimension less a margin, and a red
+  circle inscribed in it (an ellipse means the aspect is wrong). A tap on the
+  centre or a tick lands the white marker on a known mark, which checks the touch
+  mapping numerically.</li>
+<li><strong><code>black</code></strong>: every pixel black, and it stays black under taps (the server logs
+  them but paints no marker). It exists to feed a client&rsquo;s black-frame rule - for
+  example a backlight that turns off once the frame has been all black for a
+  timeout; to test the wake, restart PrimeServe on a lit screen and let the
+  client reconnect. It is not in the cycle, and asking for it with <code>--cycle</code> is a
+  usage error.</li>
+</ul>
+<p><strong><code>--cycle S</code></strong> shows the four picture screens in turn, <code>S</code> seconds each, in the
+order above starting from <code>--screen</code> (default <code>pattern</code>), the gradient stepping
+during its own turn. The last touch marker is stamped back on top of every
+repaint so a touch stays visible across screens. Frames are only ever sent in
+answer to a client&rsquo;s update request (RFB is pull), so the client&rsquo;s own request
+cadence throttles the rate; the schedule&rsquo;s deadlines are wall-clock and are
+ticked from the client&rsquo;s message loop, with no timer thread.</p>
+<p>Headless: there is no local window. Pure C# 5.0, <code>csc.exe</code>, references only
+<code>mscorlib</code> + <code>System</code> (sockets, RNG, threads).</p>
+<hr />
+<h2 id="status">Status</h2>
+<ul>
+<li><strong>Builds clean</strong> with <code>csc.exe</code> (.NET Framework 4.x), 0 warnings.</li>
+<li><strong>End-to-end interop verified</strong>: version 3.8 handshake, VNC-auth DES
+  challenge/response, <code>SetPixelFormat</code> (32bpp), a full RAW frame decoded to exact
+  pixels, a pointer round-trip (touch -&gt; server marker -&gt; reflected white pixel),
+  and a heartbeat (a non-incremental 1x1 request) answered.</li>
+<li><strong>Structured as a reusable library + a separate harness</strong> (see below).</li>
+</ul>
+<hr />
+<h2 id="layout">Layout</h2>
+<pre><code>PrimeServe/
+  README.md            this file
+  LICENSE              GPL-2.0-or-later; applies to the whole tree
+  GPL-2.0.txt          the full GPL v2 text
+  build.bat            csc.exe build -&gt; build/PrimeServe.exe
+  src/
+    PixelFormat.cs     namespace PixelFormat - RFB PIXEL_FORMAT + RGB-&gt;client
+                       encode (clsPixelFormat)                          [LIBRARY]
+    Des.cs             namespace Des - DES + VNC key bit-reversal
+                       (clsDes)                                         [LIBRARY]
+    FrameBuffer.cs     namespace FrameBuffer - the reusable core: raster, dirty
+                       flag, RAW encode, and the write API (clsFrameBuffer) [LIBRARY]
+    RfbServer.cs       namespace RfbServer - the RFB protocol server, driven by
+                       registered content callbacks (clsRfbServer)      [LIBRARY]
+    TestScreens.cs     namespace TestScreens - the test screens, their schedule
+                       and the pointer marker (clsTestScreens, enmScreen) [HARNESS]
+    Program.cs         namespace PrimeServe - CLI; wires TestScreens as the
+                       server's content driver (clsProgram)             [HARNESS]
+  build/               build output (git-ignored)
+</code></pre>
+<hr />
+<h2 id="the-reusable-library-and-the-harness">The reusable library, and the harness</h2>
+<p>The four <strong>library</strong> units are <code>clsPixelFormat</code> (<code>namespace PixelFormat</code>),
+<code>clsDes</code> (<code>Des</code>), <code>clsFrameBuffer</code> (<code>FrameBuffer</code>) and <code>clsRfbServer</code>
+(<code>RfbServer</code>) - each a <code>public</code> type in its own file and namespace, so a file
+drops into another program&rsquo;s compile list with a <code>using</code>. They depend only on
+the BCL portable core (<code>System</code>, <code>System.IO</code>, <code>System.Net</code>,
+<code>System.Net.Sockets</code>, <code>System.Threading</code>) plus one CSPRNG
+(<code>System.Security.Cryptography.RNGCryptoServiceProvider</code>, for the per-connection
+VNC-auth challenge); DES is our own (<code>clsDes</code>), not the framework&rsquo;s.</p>
+<p>The server knows nothing about what it serves. A consumer:</p>
+<ol>
+<li>builds a <code>clsFrameBuffer(width, height)</code> and paints frames into it -
+   <code>lock (fb.FB_SyncRoot()) { write fb.FB_Buffer(); fb.FB_MarkDirty(); }</code>;</li>
+<li>builds a <code>clsRfbServer(port, password, fb, verbose)</code> and, if it has content
+   that changes on a schedule or wants pointer events, registers callbacks with
+   <code>SRV_SetHooks(nextEventMs, tick, describe, pointer)</code> - all optional, the
+   do-nothing defaults serving a static buffer, waiting for update requests, and
+   ignoring pointers;</li>
+<li>calls <code>SRV_Run(once)</code>.</li>
+</ol>
+<p><code>TestScreens.cs</code> and <code>Program.cs</code> are the <strong>harness</strong> (<code>internal</code>): one consumer
+of exactly that API - <code>clsTestScreens</code> paints the test screens through the
+framebuffer write API and is registered as the server&rsquo;s content driver. They are
+not part of the library and are left behind when the library is extracted for
+reuse elsewhere.</p>
+<hr />
+<h2 id="build-and-run">Build and run</h2>
+<pre><code class="language-bat">REM from Windows (or via bash: cmd.exe //c &quot;...\build.bat&quot;)
+build.bat
+
+REM the default 480x800 static pattern
+build\PrimeServe.exe --password &lt;password&gt; --width 480 --height 800 --verbose
+
+REM a smaller display, animated at 10 steps a second
+build\PrimeServe.exe --password &lt;password&gt; --width 320 --height 240 --animate 100 --verbose
+
+REM the channel-order and geometry checks, one screen for good
+build\PrimeServe.exe --password &lt;password&gt; --screen bars --verbose
+build\PrimeServe.exe --password &lt;password&gt; --screen geometry --verbose
+
+REM every picture screen in turn, ten seconds each, starting with the colour bars
+build\PrimeServe.exe --password &lt;password&gt; --screen bars --cycle 10 --verbose
+
+REM nothing lit, for a client's black-frame rule
+build\PrimeServe.exe --password &lt;password&gt; --screen black --verbose
+</code></pre>
+<p><code>&lt;password&gt;</code> is any VNC password you choose; with no <code>--password</code> the server
+offers the RFB &ldquo;None&rdquo; security type instead. <code>--password-env NAME</code> reads the
+password from an environment variable rather than the command line.</p>
+<h3>Command line</h3>
+<pre><code>PrimeServe.exe [options]
+  --port N            listen port (default 5900)
+  --width N           framebuffer width (default 480)
+  --height N          framebuffer height (default 800)
+  --password P        VNC password (default: none / No-auth)
+  --password-env NAME read the VNC password from env var NAME
+  --screen NAME       test screen: pattern | gradient | bars | geometry | black
+                      (default pattern; --animate alone selects gradient;
+                      black is not in the cycle)
+  --animate MS        gradient step period in ms (default 100 with --screen gradient;
+                      only the gradient animates)
+  --cycle S           show every screen in turn, S seconds each, starting with --screen
+  --once              serve a single client, then exit (used by the test)
+  -v, --verbose       per-message diagnostic logging
+  -h, --help / --version
+</code></pre>
+<p>A PointerEvent paints a small white marker at the pointer on every screen except
+<code>black</code>, and the marker survives a screen change.</p>
+<hr />
+<p>Headless test rig; nothing is displayed locally.</p>
+</body>
+</html>
